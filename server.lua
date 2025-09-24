@@ -29,6 +29,13 @@ end)
 local clanMembers = {}
 local playerClans = {}
 local clansData = {}
+local memberNameCache = {}
+
+local function CacheMemberName(identifier, name)
+    if identifier and name and name ~= '' then
+        memberNameCache[identifier] = name
+    end
+end
 
 -- Función para cargar todos los clanes desde la DB
 local function LoadClans()
@@ -169,6 +176,13 @@ AddEventHandler('esx_clans:createClan', function(clanName)
                     }
                     playerClans[identifier] = clanId
 
+                    local nameSuccess, nameValue = pcall(function()
+                        return xPlayer.getName()
+                    end)
+                    if nameSuccess and nameValue then
+                        CacheMemberName(identifier, nameValue)
+                    end
+
                     -- Notificar al cliente
                     TriggerClientEvent('ox_lib:notify', source, {
                         title = 'Clan',
@@ -275,6 +289,13 @@ AddEventHandler('esx_clans:acceptInvite', function(clanId, inviterId)
         if not clanMembers[clanId] then clanMembers[clanId] = {} end
         table.insert(clanMembers[clanId], identifier)
         playerClans[identifier] = clanId
+
+        local nameSuccess, nameValue = pcall(function()
+            return xPlayer.getName()
+        end)
+        if nameSuccess and nameValue then
+            CacheMemberName(identifier, nameValue)
+        end
 
         -- Notificar al nuevo miembro
         TriggerClientEvent('ox_lib:notify', source, {
@@ -463,30 +484,24 @@ ESX.RegisterServerCallback('esx_clans:getClanMembers', function(source, cb)
                 local isLeader = clanInfo and clanInfo.leader == memberId
                 local memberName = nil
                 local isOnline = false
-                
-                local success, memberPlayer = pcall(function() return ESX.GetPlayerFromIdentifier(memberId) end)
-                
+
+                local success, memberPlayer = pcall(function()
+                    return ESX.GetPlayerFromIdentifier(memberId)
+                end)
+
                 if success and memberPlayer then
                     -- Jugador online - obtener nombre de forma segura
-                    local nameSuccess, name = pcall(function() return memberPlayer.getName() end)
+                    local nameSuccess, name = pcall(function()
+                        return memberPlayer.getName()
+                    end)
                     memberName = nameSuccess and name or "Jugador online"
+                    CacheMemberName(memberId, memberName)
                     isOnline = true
                 else
-                    -- Jugador offline - obtener nombre de la BD de forma segura
-                    local dbSuccess, result = pcall(function()
-                        return MySQL.Sync.fetchAll('SELECT firstname, lastname FROM users WHERE identifier = @identifier', {
-                            ['@identifier'] = memberId
-                        })
-                    end)
-                    
-                    if dbSuccess and result and result[1] then
-                        memberName = result[1].firstname .. ' ' .. result[1].lastname
-                    else
-                        memberName = "Jugador desconocido"
-                    end
+                    memberName = memberNameCache[memberId]
                     isOnline = false
                 end
-                
+
                 table.insert(members, {
                     identifier = memberId,
                     name = memberName,
@@ -496,9 +511,57 @@ ESX.RegisterServerCallback('esx_clans:getClanMembers', function(source, cb)
             end
         end
     end)
-    
-    -- Siempre devolver algo válido al cliente
-    cb(members)
+
+    local missingNames = {}
+    local memberIndexLookup = {}
+
+    for index, member in ipairs(members) do
+        if not member.name or member.name == '' then
+            table.insert(missingNames, member.identifier)
+            memberIndexLookup[member.identifier] = index
+        end
+    end
+
+    if #missingNames == 0 then
+        cb(members)
+        return
+    end
+
+    local placeholders = {}
+    local parameters = {}
+
+    for i = 1, #missingNames do
+        local identifier = missingNames[i]
+        local key = ('@identifier%s'):format(i)
+        placeholders[#placeholders + 1] = key
+        parameters[key] = identifier
+    end
+
+    local query = ('SELECT identifier, firstname, lastname FROM users WHERE identifier IN (%s)')
+        :format(table.concat(placeholders, ','))
+
+    MySQL.Async.fetchAll(query, parameters, function(result)
+        local fetched = {}
+
+        for _, row in ipairs(result or {}) do
+            local fullname = (row.firstname or '') .. ' ' .. (row.lastname or '')
+            fullname = fullname:gsub('^%s*(.-)%s*$', '%1')
+
+            if fullname == '' then
+                fullname = 'Jugador desconocido'
+            end
+
+            CacheMemberName(row.identifier, fullname)
+            fetched[row.identifier] = fullname
+        end
+
+        for identifier, index in pairs(memberIndexLookup) do
+            local cachedName = fetched[identifier] or memberNameCache[identifier]
+            members[index].name = cachedName or 'Jugador desconocido'
+        end
+
+        cb(members)
+    end)
 end)
 
 -- Obtener información del clan del jugador

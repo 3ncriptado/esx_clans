@@ -9,6 +9,9 @@ local showHUD = Config.HUD.enabled
 local clanBlips = {}
 local clanBaseBlip = nil
 local clanBase = nil
+local isRefreshingMembers = false
+local pendingMembersRefresh = false
+local isUpdatingBlips = false
 
 -- Comandos
 RegisterCommand('openclanmenu', function()
@@ -48,15 +51,29 @@ end
 -- Funciones principales
 local function RefreshClanMembers()
     if not clanId then return end
-    
+
+    if isRefreshingMembers then
+        pendingMembersRefresh = true
+        return
+    end
+
+    isRefreshingMembers = true
+
     ESX.TriggerServerCallback('esx_clans:getClanMembers', function(members)
         if members then
             clanMembers = members
-            
+
             -- Actualizar el HUD NUI si está habilitado
             if showHUD then
                 UpdateNUIHUD()
             end
+        end
+
+        isRefreshingMembers = false
+
+        if pendingMembersRefresh then
+            pendingMembersRefresh = false
+            RefreshClanMembers()
         end
     end)
 end
@@ -120,16 +137,18 @@ local function RemoveAllClanBlips()
 end
 
 local function UpdateClanMembersBlips()
-    if not clanId then return end
-    
+    if not clanId or isUpdatingBlips then return end
+
     -- Eliminar blips antiguos
     RemoveAllClanBlips()
-    
+
+    isUpdatingBlips = true
+
     -- Obtener ubicaciones de los miembros
     ESX.TriggerServerCallback('esx_clans:getClanMembersLocations', function(locations)
         for name, coords in pairs(locations) do
             local blip = AddBlipForCoord(coords.x, coords.y, coords.z)
-            
+
             SetBlipSprite(blip, 1)
             SetBlipDisplay(blip, 4)
             SetBlipScale(blip, 0.7)
@@ -139,9 +158,11 @@ local function UpdateClanMembersBlips()
             BeginTextCommandSetBlipName("STRING")
             AddTextComponentString(name)
             EndTextCommandSetBlipName(blip)
-            
+
             table.insert(clanBlips, blip)
         end
+
+        isUpdatingBlips = false
     end)
 end
 
