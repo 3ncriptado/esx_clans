@@ -27,31 +27,66 @@ end)
 
 -- Cache local de clanes para mejorar rendimiento
 local clanMembers = {}
-local clanLeaders = {}
 local playerClans = {}
+local clansData = {}
 
 -- Función para cargar todos los clanes desde la DB
 local function LoadClans()
-    MySQL.Async.fetchAll('SELECT c.id, c.name, c.leader, cm.identifier FROM clans c LEFT JOIN clan_members cm ON c.id = cm.clan_id', {}, function(results)
-        clanMembers = {}
-        clanLeaders = {}
-        playerClans = {}
-        
-        for _, row in ipairs(results) do
-            local clanId = row.id
-            
-            -- Inicializar arrays si no existen
-            if not clanMembers[clanId] then
-                clanMembers[clanId] = {}
-                clanLeaders[clanId] = row.leader
-            end
-            
-            -- Añadir miembro a la lista
-            if row.identifier then
-                table.insert(clanMembers[clanId], row.identifier)
-                playerClans[row.identifier] = clanId
-            end
+    MySQL.Async.fetchAll('SELECT id, name, leader, base_x, base_y, base_z FROM clans', {}, function(clans)
+        local newClanMembers = {}
+        local newPlayerClans = {}
+        local newClansData = {}
+
+        for _, clan in ipairs(clans) do
+            local clanId = clan.id
+
+            newClansData[clanId] = {
+                id = clan.id,
+                name = clan.name,
+                leader = clan.leader,
+                base_x = clan.base_x,
+                base_y = clan.base_y,
+                base_z = clan.base_z
+            }
+
+            newClanMembers[clanId] = {}
         end
+
+        MySQL.Async.fetchAll('SELECT clan_id, identifier FROM clan_members', {}, function(members)
+            for _, row in ipairs(members) do
+                local clanId = row.clan_id
+
+                if not newClanMembers[clanId] then
+                    newClanMembers[clanId] = {}
+                end
+
+                table.insert(newClanMembers[clanId], row.identifier)
+                newPlayerClans[row.identifier] = clanId
+            end
+
+            for clanId, clanInfo in pairs(newClansData) do
+                local membersList = newClanMembers[clanId] or {}
+                local leaderFound = false
+
+                for i = 1, #membersList do
+                    if membersList[i] == clanInfo.leader then
+                        leaderFound = true
+                        break
+                    end
+                end
+
+                if not leaderFound then
+                    table.insert(membersList, clanInfo.leader)
+                end
+
+                newClanMembers[clanId] = membersList
+                newPlayerClans[clanInfo.leader] = clanId
+            end
+
+            clanMembers = newClanMembers
+            playerClans = newPlayerClans
+            clansData = newClansData
+        end)
     end)
 end
 
@@ -61,53 +96,20 @@ LoadClans()
 -- Obtener el clan del jugador
 local function GetPlayerClan(identifier)
     local clanId = playerClans[identifier]
-    
+
     if not clanId then
         return nil
     end
-    
-    -- Intentar usar la cache local primero (si está disponible)
-    if clanMembers[clanId] and clanLeaders[clanId] then
-        -- Devolver información básica desde la cache si no se puede acceder a la DB
-        local clanBasicInfo = {
-            id = clanId,
-            name = "Clan " .. clanId,  -- Nombre genérico si no se puede obtener el real
-            leader = clanLeaders[clanId]
-        }
-        
-        -- Intentar obtener datos completos de la DB, pero usar cache si falla
-        local success, result = pcall(function()
-            return MySQL.Sync.fetchAll('SELECT id, name, leader, base_x, base_y, base_z FROM clans WHERE id = @clanId', {
-                ['@clanId'] = clanId
-            })
-        end)
-        
-        if success and result and result[1] then
-            return result[1]
-        else
-            print("^1[esx_clans] Error al acceder a la base de datos en GetPlayerClan, usando datos en cache^7")
-            return clanBasicInfo
-        end
-    else
-        -- Intentar obtener datos de la DB si no hay cache
-        local success, result = pcall(function()
-            return MySQL.Sync.fetchAll('SELECT id, name, leader, base_x, base_y, base_z FROM clans WHERE id = @clanId', {
-                ['@clanId'] = clanId
-            })
-        end)
-        
-        if success and result and result[1] then
-            return result[1]
-        end
-    end
-    
-    return nil
+
+    return clansData[clanId]
 end
 
 -- Verificar si un jugador es líder de un clan
 local function IsPlayerClanLeader(identifier)
     local clanId = playerClans[identifier]
-    if clanId and clanLeaders[clanId] == identifier then
+    local clanInfo = clanId and clansData[clanId]
+
+    if clanInfo and clanInfo.leader == identifier then
         return true
     end
     return false
@@ -157,9 +159,16 @@ AddEventHandler('esx_clans:createClan', function(clanName)
                     -- Actualizar caché local
                     if not clanMembers[clanId] then clanMembers[clanId] = {} end
                     table.insert(clanMembers[clanId], identifier)
-                    clanLeaders[clanId] = identifier
+                    clansData[clanId] = {
+                        id = clanId,
+                        name = clanName,
+                        leader = identifier,
+                        base_x = nil,
+                        base_y = nil,
+                        base_z = nil
+                    }
                     playerClans[identifier] = clanId
-                    
+
                     -- Notificar al cliente
                     TriggerClientEvent('ox_lib:notify', source, {
                         title = 'Clan',
@@ -208,24 +217,24 @@ AddEventHandler('esx_clans:invitePlayer', function(targetId)
         return
     end
     
-    -- Obtener información del clan
-    MySQL.Async.fetchAll('SELECT name FROM clans WHERE id = @clanId', {
-        ['@clanId'] = clanId
-    }, function(result)
-        if result and result[1] then
-            local clanName = result[1].name
-            
-            -- Notificar al jugador que invitó
-            TriggerClientEvent('ox_lib:notify', source, {
-                title = 'Clan',
-                description = string.format(Config.Locale['player_invited'], GetPlayerName(targetId)),
-                type = 'success'
-            })
-            
-            -- Enviar invitación al jugador objetivo
-            TriggerClientEvent('esx_clans:receiveClanInvite', targetId, clanId, clanName, source)
-        end
-    end)
+    local clanInfo = clansData[clanId]
+
+    if not clanInfo then
+        print(('^1[esx_clans] Clan %s no encontrado en cache al invitar jugadores^7'):format(tostring(clanId)))
+        return
+    end
+
+    local clanName = clanInfo.name
+
+    -- Notificar al jugador que invitó
+    TriggerClientEvent('ox_lib:notify', source, {
+        title = 'Clan',
+        description = string.format(Config.Locale['player_invited'], GetPlayerName(targetId)),
+        type = 'success'
+    })
+
+    -- Enviar invitación al jugador objetivo
+    TriggerClientEvent('esx_clans:receiveClanInvite', targetId, clanId, clanName, source)
 end)
 
 RegisterNetEvent('esx_clans:acceptInvite')
@@ -248,49 +257,50 @@ AddEventHandler('esx_clans:acceptInvite', function(clanId, inviterId)
     end
     
     -- Verificar que el clan exista
-    MySQL.Async.fetchAll('SELECT name FROM clans WHERE id = @clanId', {
-        ['@clanId'] = clanId
-    }, function(result)
-        if result and result[1] then
-            local clanName = result[1].name
-            
-            -- Añadir al jugador al clan
-            MySQL.Async.execute('INSERT INTO clan_members (clan_id, identifier) VALUES (@clanId, @identifier)', {
-                ['@clanId'] = clanId,
-                ['@identifier'] = identifier
-            }, function()
-                -- Actualizar caché local
-                if not clanMembers[clanId] then clanMembers[clanId] = {} end
-                table.insert(clanMembers[clanId], identifier)
-                playerClans[identifier] = clanId
-                
-                -- Notificar al nuevo miembro
-                TriggerClientEvent('ox_lib:notify', source, {
-                    title = 'Clan',
-                    description = string.format(Config.Locale['you_joined'], clanName),
-                    type = 'success'
-                })
-                
-                -- Notificar al líder que invitó
-                if inviterId then
-                    TriggerClientEvent('ox_lib:notify', inviterId, {
-                        title = 'Clan',
-                        description = string.format(Config.Locale['player_joined'], GetPlayerName(source)),
-                        type = 'success'
-                    })
-                end
-                
-                -- Actualizar la lista de miembros del clan para el cliente
-                TriggerClientEvent('esx_clans:updateClanInfo', source, clanId, clanName, false)
-                
-                -- Enviar actualización a todos los miembros del clan
-                for _, memberId in pairs(ESX.GetPlayers()) do
-                    local xMember = ESX.GetPlayerFromId(memberId)
-                    if xMember and playerClans[xMember.identifier] == clanId then
-                        TriggerClientEvent('esx_clans:updateMembersList', memberId)
-                    end
-                end
-            end)
+    local clanInfo = clansData[clanId]
+
+    if not clanInfo then
+        print(('^1[esx_clans] Clan %s no encontrado en cache al aceptar invitación^7'):format(tostring(clanId)))
+        return
+    end
+
+    local clanName = clanInfo.name
+
+    -- Añadir al jugador al clan
+    MySQL.Async.execute('INSERT INTO clan_members (clan_id, identifier) VALUES (@clanId, @identifier)', {
+        ['@clanId'] = clanId,
+        ['@identifier'] = identifier
+    }, function()
+        -- Actualizar caché local
+        if not clanMembers[clanId] then clanMembers[clanId] = {} end
+        table.insert(clanMembers[clanId], identifier)
+        playerClans[identifier] = clanId
+
+        -- Notificar al nuevo miembro
+        TriggerClientEvent('ox_lib:notify', source, {
+            title = 'Clan',
+            description = string.format(Config.Locale['you_joined'], clanName),
+            type = 'success'
+        })
+
+        -- Notificar al líder que invitó
+        if inviterId then
+            TriggerClientEvent('ox_lib:notify', inviterId, {
+                title = 'Clan',
+                description = string.format(Config.Locale['player_joined'], GetPlayerName(source)),
+                type = 'success'
+            })
+        end
+
+        -- Actualizar la lista de miembros del clan para el cliente
+        TriggerClientEvent('esx_clans:updateClanInfo', source, clanId, clanName, false)
+
+        -- Enviar actualización a todos los miembros del clan
+        for _, memberId in pairs(ESX.GetPlayers()) do
+            local xMember = ESX.GetPlayerFromId(memberId)
+            if xMember and playerClans[xMember.identifier] == clanId then
+                TriggerClientEvent('esx_clans:updateMembersList', memberId)
+            end
         end
     end)
 end)
@@ -413,7 +423,7 @@ AddEventHandler('esx_clans:deleteClan', function()
             
             -- Limpiar caché local
             clanMembers[clanId] = nil
-            clanLeaders[clanId] = nil
+            clansData[clanId] = nil
             
             -- Notificar al líder
             TriggerClientEvent('ox_lib:notify', source, {
@@ -449,7 +459,8 @@ ESX.RegisterServerCallback('esx_clans:getClanMembers', function(source, cb)
     pcall(function()
         for _, memberId in ipairs(memberIds) do
             if memberId then -- Verificar que el ID del miembro es válido
-                local isLeader = clanLeaders[clanId] == memberId
+                local clanInfo = clansData[clanId]
+                local isLeader = clanInfo and clanInfo.leader == memberId
                 local memberName = nil
                 local isOnline = false
                 
@@ -632,6 +643,11 @@ AddEventHandler('esx_clans:setClanBase', function(coords)
         ['@z'] = coords.z,
         ['@clanId'] = clanId
     }, function()
+        if clansData[clanId] then
+            clansData[clanId].base_x = coords.x
+            clansData[clanId].base_y = coords.y
+            clansData[clanId].base_z = coords.z
+        end
         -- Notificar al líder
         TriggerClientEvent('ox_lib:notify', source, {
             title = 'Clan',
@@ -678,6 +694,11 @@ AddEventHandler('esx_clans:removeClanBase', function()
     MySQL.Async.execute('UPDATE clans SET base_x = NULL, base_y = NULL, base_z = NULL WHERE id = @clanId', {
         ['@clanId'] = clanId
     }, function()
+        if clansData[clanId] then
+            clansData[clanId].base_x = nil
+            clansData[clanId].base_y = nil
+            clansData[clanId].base_z = nil
+        end
         -- Notificar al líder
         TriggerClientEvent('ox_lib:notify', source, {
             title = 'Clan',
