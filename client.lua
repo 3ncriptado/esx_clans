@@ -18,8 +18,6 @@ RegisterCommand('openclanmenu', function()
     OpenClanMenu()
 end, false)
 
--- RegisterKeyMapping('clan', 'Abrir menú de clan', 'keyboard', 'F7') -- Tecla F7 para abrir el menú
-
 -- Funciones de utilidad
 
 -- Funciones para el HUD NUI
@@ -39,21 +37,21 @@ local function UpdateNUIHUD()
     })
 end
 
-local function GetPlayerByIdentifier(identifier)
-    for _, member in ipairs(clanMembers) do
-        if member.identifier == identifier then
-            return member
-        end
-    end
-    return nil
-end
-
 -- Funciones principales
-local function RefreshClanMembers()
+local lastMembersRefresh = 0
+
+local function RefreshClanMembers(force)
     if not clanId then return end
 
+    if not force then
+        local elapsed = GetGameTimer() - lastMembersRefresh
+        if elapsed < Config.HUD.updateInterval then
+            return
+        end
+    end
+
     if isRefreshingMembers then
-        pendingMembersRefresh = true
+        pendingMembersRefresh = pendingMembersRefresh or force
         return
     end
 
@@ -69,11 +67,12 @@ local function RefreshClanMembers()
             end
         end
 
+        lastMembersRefresh = GetGameTimer()
         isRefreshingMembers = false
 
         if pendingMembersRefresh then
             pendingMembersRefresh = false
-            RefreshClanMembers()
+            RefreshClanMembers(true)
         end
     end)
 end
@@ -128,10 +127,11 @@ local function RemoveClanBaseBlip()
 end
 
 local function RemoveAllClanBlips()
-    for _, blip in pairs(clanBlips) do
-        if DoesBlipExist(blip) then
-            RemoveBlip(blip)
+    for identifier, data in pairs(clanBlips) do
+        if data.blip and DoesBlipExist(data.blip) then
+            RemoveBlip(data.blip)
         end
+        clanBlips[identifier] = nil
     end
     clanBlips = {}
 end
@@ -139,30 +139,81 @@ end
 local function UpdateClanMembersBlips()
     if not clanId or isUpdatingBlips then return end
 
-    -- Eliminar blips antiguos
-    RemoveAllClanBlips()
-
     isUpdatingBlips = true
+    local callbackHandled = false
 
     -- Obtener ubicaciones de los miembros
     ESX.TriggerServerCallback('esx_clans:getClanMembersLocations', function(locations)
-        for name, coords in pairs(locations) do
-            local blip = AddBlipForCoord(coords.x, coords.y, coords.z)
+        callbackHandled = true
 
-            SetBlipSprite(blip, 1)
-            SetBlipDisplay(blip, 4)
-            SetBlipScale(blip, 0.7)
-            SetBlipColour(blip, 2)
-            SetBlipAsShortRange(blip, false)
-            
-            BeginTextCommandSetBlipName("STRING")
-            AddTextComponentString(name)
-            EndTextCommandSetBlipName(blip)
+        local success, err = pcall(function()
+            locations = locations or {}
+            local activeIdentifiers = {}
 
-            table.insert(clanBlips, blip)
+            for identifier, data in pairs(locations) do
+                if data.coords then
+                    activeIdentifiers[identifier] = true
+                    local coords = data.coords
+                    local name = data.name or 'Miembro del clan'
+                    local blipInfo = clanBlips[identifier]
+
+                    if blipInfo and blipInfo.blip and DoesBlipExist(blipInfo.blip) then
+                        SetBlipCoords(blipInfo.blip, coords.x, coords.y, coords.z)
+
+                        if name ~= blipInfo.name then
+                            BeginTextCommandSetBlipName("STRING")
+                            AddTextComponentString(name)
+                            EndTextCommandSetBlipName(blipInfo.blip)
+                            blipInfo.name = name
+                        end
+                    else
+                        local blip = AddBlipForCoord(coords.x, coords.y, coords.z)
+
+                        SetBlipSprite(blip, 1)
+                        SetBlipDisplay(blip, 4)
+                        SetBlipScale(blip, 0.7)
+                        SetBlipColour(blip, 2)
+                        SetBlipAsShortRange(blip, false)
+
+                        BeginTextCommandSetBlipName("STRING")
+                        AddTextComponentString(name)
+                        EndTextCommandSetBlipName(blip)
+
+                        clanBlips[identifier] = {
+                            blip = blip,
+                            name = name
+                        }
+                    end
+                end
+            end
+
+            local toRemove = {}
+            for identifier in pairs(clanBlips) do
+                if not activeIdentifiers[identifier] then
+                    toRemove[#toRemove + 1] = identifier
+                end
+            end
+
+            for _, identifier in ipairs(toRemove) do
+                local blipInfo = clanBlips[identifier]
+                if blipInfo and blipInfo.blip and DoesBlipExist(blipInfo.blip) then
+                    RemoveBlip(blipInfo.blip)
+                end
+                clanBlips[identifier] = nil
+            end
+        end)
+
+        if not success then
+            print(('[esx_clans] Error al actualizar blips de clan: %s'):format(err))
         end
 
         isUpdatingBlips = false
+    end)
+
+    Citizen.SetTimeout(5000, function()
+        if isUpdatingBlips and not callbackHandled then
+            isUpdatingBlips = false
+        end
     end)
 end
 
@@ -173,7 +224,7 @@ function OpenClanMenu()
             clanId = clan.id
             clanName = clan.name
             isLeader = clan.isLeader
-            RefreshClanMembers()
+            RefreshClanMembers(true)
             OpenMemberClanMenu()
         else
             OpenNoClanMenu()
@@ -419,7 +470,7 @@ AddEventHandler('esx_clans:updateClanInfo', function(id, name, leader)
     clanId = id
     clanName = name
     isLeader = leader
-    RefreshClanMembers()
+    RefreshClanMembers(true)
     
     -- Inicializar el HUD NUI
     if showHUD then
@@ -431,7 +482,7 @@ end)
 -- Actualizar lista de miembros
 RegisterNetEvent('esx_clans:updateMembersList')
 AddEventHandler('esx_clans:updateMembersList', function()
-    RefreshClanMembers()
+    RefreshClanMembers(true)
 end)
 
 -- Salir del clan
@@ -441,9 +492,12 @@ AddEventHandler('esx_clans:leftClan', function()
     clanName = nil
     isLeader = false
     clanMembers = {}
+    pendingMembersRefresh = false
+    isRefreshingMembers = false
+    lastMembersRefresh = 0
     RemoveAllClanBlips()
     RemoveClanBaseBlip() -- Eliminar blip de la base al salir del clan
-    
+
     -- Ocultar el HUD NUI
     SendNUIMessage({
         action = 'toggleVisibility',
@@ -484,7 +538,7 @@ Citizen.CreateThread(function()
     while true do
         if clanId then
             -- Refrescar miembros y actualizar el HUD NUI
-            RefreshClanMembers()
+            RefreshClanMembers(false)
         end
         Citizen.Wait(Config.HUD.updateInterval)
     end
@@ -505,9 +559,9 @@ AddEventHandler('esx:playerLoaded', function()
             if clan.base then
                 CreateClanBaseBlip(clan.base)
             end
-            
-            RefreshClanMembers()
-            
+
+            RefreshClanMembers(true)
+
             -- Mostrar el HUD NUI si está habilitado
             if showHUD then
                 UpdateNUIHUD()

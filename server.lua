@@ -634,46 +634,66 @@ end)
 -- Obtener coordenadas de los miembros del clan
 ESX.RegisterServerCallback('esx_clans:getClanMembersLocations', function(source, cb)
     local xPlayer = ESX.GetPlayerFromId(source)
-    
-    if not xPlayer then 
+
+    if not xPlayer then
         cb({})
         return
     end
-    
+
     local identifier = xPlayer.identifier
     local clanId = playerClans[identifier]
-    
+
     if not clanId then
         cb({})
         return
     end
-    
+
     local memberLocations = {}
-    
-    -- Proteger con pcall para evitar errores si algo falla
-    pcall(function()
+
+    local success, err = pcall(function()
         for _, memberId in ipairs(clanMembers[clanId] or {}) do
-            -- Verificar que el miembro existe
-            if memberId then
-                local memberPlayer = ESX.GetPlayerFromIdentifier(memberId)
-                -- Verificar que el jugador está online y no es el que hace la petición
-                if memberPlayer and memberPlayer.source ~= source then
-                    local success, coords = pcall(function() return memberPlayer.getCoords(true) end)
-                    local success2, name = pcall(function() return memberPlayer.getName() end)
-                    
-                    -- Solo añadir si ambas llamadas tuvieron éxito
-                    if success and success2 and coords and name then
-                        memberLocations[name] = {
-                            x = coords.x,
-                            y = coords.y,
-                            z = coords.z
+            if memberId and memberId ~= identifier then
+                local okPlayer, memberPlayer = pcall(function()
+                    return ESX.GetPlayerFromIdentifier(memberId)
+                end)
+
+                if okPlayer and memberPlayer and memberPlayer.source ~= source then
+                    local okCoords, coords = pcall(function()
+                        return memberPlayer.getCoords(true)
+                    end)
+
+                    if okCoords and coords then
+                        local memberName = memberNameCache[memberId]
+
+                        if not memberName or memberName == '' then
+                            local okName, fetchedName = pcall(function()
+                                return memberPlayer.getName()
+                            end)
+
+                            if okName and fetchedName and fetchedName ~= '' then
+                                memberName = fetchedName
+                                CacheMemberName(memberId, memberName)
+                            end
+                        end
+
+                        memberLocations[memberId] = {
+                            name = memberName or 'Miembro del clan',
+                            coords = {
+                                x = coords.x,
+                                y = coords.y,
+                                z = coords.z
+                            }
                         }
                     end
                 end
             end
         end
     end)
-    
+
+    if not success then
+        print(('[esx_clans] Error al obtener ubicaciones de miembros: %s'):format(err))
+    end
+
     cb(memberLocations)
 end)
 
